@@ -210,6 +210,7 @@ var global = function () {
         local = self;
     } else {
         try {
+            // tslint:disable-next-line:function-constructor
             local = Function('return this')();
         } catch (e) {
             throw new Error('global object is unavailable in this environment');
@@ -226,6 +227,7 @@ var fakeDoc = {
     createTextNode: noop
 };
 var doc = isBrowser ? document : fakeDoc;
+var isMacSafari = isBrowser && navigator.platform && /mac/i.test(navigator.platform) && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
 function isNumber(arg) {
     return typeof arg === 'number';
@@ -241,11 +243,25 @@ function isBoolean(arg) {
     return arg === true || arg === false;
 }
 var isArray = Array.isArray;
+function isObject(arg) {
+    return arg === Object(arg) && !isFunction(arg);
+}
 function isUndefined(o) {
     return o === undefined;
 }
+// Object.is polyfill
+// https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Object/is
+function objectIs(x, y) {
+    if (x === y) {
+        // Steps 1-5, 7-10
+        // Steps 6.b-6.e: +0 != -0
+        return x !== 0 || 1 / x === 1 / y;
+    }
+    // eslint-disable-next-line no-self-compare
+    return x !== x && y !== y;
+}
 
-var canUsePromise = 'Promise' in global;
+var canUsePromise = 'Promise' in global && !isMacSafari;
 var resolved;
 if (canUsePromise) {
     resolved = Promise.resolve();
@@ -259,7 +275,7 @@ var nextTick = function (fn) {
     if (canUsePromise) {
         return resolved.then(fn);
     }
-    var timerFunc = 'requestAnimationFrame' in global ? requestAnimationFrame : setTimeout;
+    var timerFunc = 'requestAnimationFrame' in global && !isMacSafari ? requestAnimationFrame : setTimeout;
     timerFunc(fn);
 };
 
@@ -404,7 +420,8 @@ function clone(obj) {
 }
 
 var Current = {
-    current: null
+    current: null,
+    index: 0
 };
 
 var EMPTY_CHILDREN = [];
@@ -443,7 +460,6 @@ var VType;
     VType[VType["Text"] = 1] = "Text";
     VType[VType["Node"] = 2] = "Node";
     VType[VType["Composite"] = 4] = "Composite";
-    VType[VType["Stateless"] = 8] = "Stateless";
     VType[VType["Void"] = 16] = "Void";
     VType[VType["Portal"] = 32] = "Portal";
 })(VType || (VType = {}));
@@ -460,23 +476,33 @@ var Ref = {
     attach: function attach(vnode, ref, domNode) {
         var node = isComposite(vnode) ? vnode.component : domNode;
         if (isFunction(ref)) {
-            ref(node);
+            var componentForCatcher = isComposite(vnode) ? vnode.component : vnode;
+            errorCatcher(function () {
+                ref(node);
+            }, componentForCatcher);
         } else if (isString(ref)) {
             var inst = vnode._owner;
             if (inst && isFunction(inst.render)) {
                 inst.refs[ref] = node;
             }
+        } else if (isObject(ref)) {
+            ref.current = node;
         }
     },
     detach: function detach(vnode, ref, domNode) {
         var node = isComposite(vnode) ? vnode.component : domNode;
         if (isFunction(ref)) {
-            ref(null);
+            var componentForCatcher = isComposite(vnode) ? vnode.component : vnode;
+            errorCatcher(function () {
+                ref(null);
+            }, componentForCatcher);
         } else if (isString(ref)) {
             var inst = vnode._owner;
             if (inst.refs[ref] === node && isFunction(inst.render)) {
                 delete inst.refs[ref];
             }
+        } else if (isObject(ref)) {
+            ref.current = null;
         }
     }
 };
@@ -775,14 +801,6 @@ function attachEventToNode(node, eventName, delegatedRoots) {
     return eventHandler;
 }
 
-var options = {
-    afterMount: noop$1,
-    afterUpdate: noop$1,
-    beforeUnmount: noop$1,
-    roots: [],
-    debug: false
-};
-
 function unmountChildren(children, parentDom) {
     if (isArray(children)) {
         for (var i = 0, len = children.length; i < len; i++) {
@@ -800,8 +818,7 @@ function unmount(vnode, parentDom) {
     // Bitwise operators for better performance
     // see: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Bitwise_Operators
     var dom = vnode.dom;
-    if ((vtype & (4 /* Composite */ | 8 /* Stateless */)) > 0) {
-        options.beforeUnmount(vnode);
+    if ((vtype & 4 /* Composite */) > 0) {
         vnode.destroy();
     } else if ((vtype & 2 /* Node */) > 0) {
         var props = vnode.props;
@@ -1115,9 +1132,8 @@ function patch(lastVnode, nextVnode, parentNode, context, isSvg) {
                     Ref.update(lastVnode, nextVnode, lastDom);
                 }
                 newDom = lastDom;
-            } else if ((vtype & (4 /* Composite */ | 8 /* Stateless */)) > 0) {
+            } else if ((vtype & 4 /* Composite */) > 0) {
             newDom = nextVnode.update(lastVnode, nextVnode, context);
-            options.afterUpdate(nextVnode);
         } else if (vtype & 1 /* Text */) {
                 return patchVText(lastVnode, nextVnode);
             } else if (vtype & 32 /* Portal */) {
@@ -1581,9 +1597,8 @@ function createElement(vnode, isSvg, parentContext, parentComponent) {
     var domNode;
     if (isValidElement(vnode)) {
         var vtype = vnode.vtype;
-        if (vtype & (4 /* Composite */ | 8 /* Stateless */)) {
+        if (vtype & 4 /* Composite */) {
             domNode = vnode.init(parentContext, parentComponent);
-            options.afterMount(vnode);
         } else if (vtype & 1 /* Text */) {
                 domNode = doc.createTextNode(vnode.text);
                 vnode.dom = domNode;
@@ -1675,6 +1690,167 @@ function createVoid() {
     };
 }
 
+function getHooks(index) {
+    if (Current.current === null) {
+        throw new Error("invalid hooks call: hooks can only be called in a stateless component.");
+    }
+    var hooks = Current.current.hooks;
+    if (index >= hooks.length) {
+        hooks.push({});
+    }
+    return hooks[index];
+}
+function useState(initialState) {
+    if (isFunction(initialState)) {
+        initialState = initialState();
+    }
+    var hook = getHooks(Current.index++);
+    if (!hook.state) {
+        hook.component = Current.current;
+        hook.state = [initialState, function (action) {
+            hook.state[0] = isFunction(action) ? action(hook.state[0]) : action;
+            hook.component._disable = false;
+            hook.component.setState({});
+        }];
+    }
+    return hook.state;
+}
+function useReducer(reducer, initialState, initializer) {
+    if (isFunction(initialState)) {
+        initialState = initialState();
+    }
+    var hook = getHooks(Current.index++);
+    if (!hook.state) {
+        hook.component = Current.current;
+        hook.state = [isUndefined(initializer) ? initialState : initializer(initialState), function (action) {
+            hook.state[0] = reducer(hook.state[0], action);
+            hook.component._disable = false;
+            hook.component.setState({});
+        }];
+    }
+    return hook.state;
+}
+function areDepsChanged(prevDeps, deps) {
+    if (isNullOrUndef(prevDeps) || isNullOrUndef(deps)) {
+        return true;
+    }
+    return deps.some(function (d, i) {
+        return !objectIs(d, prevDeps[i]);
+    });
+}
+function invokeEffects(component, delay) {
+    if (delay === void 0) delay = false;
+
+    var effects = delay ? component.effects : component.layoutEffects;
+    effects.forEach(function (hook) {
+        if (isFunction(hook.cleanup)) {
+            hook.cleanup();
+        }
+        var result = hook.effect();
+        if (isFunction(result)) {
+            hook.cleanup = result;
+        }
+    });
+    if (delay) {
+        component.effects = [];
+    } else {
+        component.layoutEffects = [];
+    }
+}
+var scheduleEffectComponents = [];
+function invokeScheduleEffects(component) {
+    if (!component._afterScheduleEffect) {
+        component._afterScheduleEffect = true;
+        scheduleEffectComponents.push(component);
+        if (scheduleEffectComponents.length === 1) {
+            nextTick(function () {
+                setTimeout(function () {
+                    scheduleEffectComponents.forEach(function (c) {
+                        c._afterScheduleEffect = false;
+                        invokeEffects(c, true);
+                    });
+                    scheduleEffectComponents = [];
+                }, 0);
+            });
+        }
+    }
+}
+function useEffectImpl(effect, deps, delay) {
+    if (delay === void 0) delay = false;
+
+    var hook = getHooks(Current.index++);
+    if (areDepsChanged(hook.deps, deps)) {
+        hook.effect = effect;
+        hook.deps = deps;
+        if (delay) {
+            Current.current.effects = Current.current.effects.concat(hook);
+            invokeScheduleEffects(Current.current);
+        } else {
+            Current.current.layoutEffects = Current.current.layoutEffects.concat(hook);
+        }
+    }
+}
+function useEffect(effect, deps) {
+    useEffectImpl(effect, deps, true);
+}
+function useLayoutEffect(effect, deps) {
+    useEffectImpl(effect, deps);
+}
+function useRef(initialValue) {
+    var hook = getHooks(Current.index++);
+    if (!hook.ref) {
+        hook.ref = {
+            current: initialValue
+        };
+    }
+    return hook.ref;
+}
+function useMemo(factory, deps) {
+    var hook = getHooks(Current.index++);
+    if (areDepsChanged(hook.deps, deps)) {
+        hook.deps = deps;
+        hook.callback = factory;
+        hook.value = factory();
+    }
+    return hook.value;
+}
+function useCallback(callback, deps) {
+    return useMemo(function () {
+        return callback;
+    }, deps);
+}
+function useContext(context) {
+    var provider = Current.current.context[context._id];
+    if (isUndefined(provider)) {
+        return context._defaultValue;
+    }
+    var hook = getHooks(Current.index++);
+    // should update when value changes with shouldComponentUpdate:false Component on top
+    if (isUndefined(hook.context)) {
+        hook.context = true;
+        var c = Current.current;
+        provider.on(function () {
+            return enqueueRender(c);
+        });
+    }
+    return provider.value;
+}
+function useImperativeHandle(ref, init, deps) {
+    useLayoutEffect(function () {
+        if (isFunction(ref)) {
+            ref(init());
+            return function () {
+                return ref(null);
+            };
+        } else if (!isUndefined(ref)) {
+            ref.current = init();
+            return function () {
+                delete ref.current;
+            };
+        }
+    }, isArray(deps) ? deps.concat([ref]) : undefined);
+}
+
 // import { extend, isFunction, isNumber, isString } from 'nerv-utils'
 var readyComponents = [];
 function errorCatcher(fn, component) {
@@ -1685,9 +1861,12 @@ function errorCatcher(fn, component) {
     }
 }
 function errorHandler(component, error) {
+    // if(!component) { throw error ; return }
     var boundary;
     while (true) {
-        if (isFunction(component.componentDidCatch)) {
+        var ref = component.constructor;
+        var getDerivedStateFromError = ref.getDerivedStateFromError;
+        if (isFunction(getDerivedStateFromError) || isFunction(component.componentDidCatch)) {
             boundary = component;
             break;
         } else if (component._parentComponent) {
@@ -1697,9 +1876,15 @@ function errorHandler(component, error) {
         }
     }
     if (boundary) {
+        var ref$1 = boundary.constructor;
+        var getDerivedStateFromError$1 = ref$1.getDerivedStateFromError;
         var _disable = boundary._disable;
         boundary._disable = false;
-        boundary.componentDidCatch(error);
+        if (isFunction(getDerivedStateFromError$1)) {
+            component.setState(getDerivedStateFromError$1(error));
+        } else if (isFunction(component.componentDidCatch)) {
+            boundary.componentDidCatch(error);
+        }
         boundary._disable = _disable;
     } else {
         throw error;
@@ -1718,13 +1903,29 @@ function mountVNode(vnode, parentContext, parentComponent) {
 }
 function mountComponent(vnode, parentContext, parentComponent) {
     var ref = vnode.ref;
-    vnode.component = new vnode.type(vnode.props, parentContext);
+    if (vnode.type.prototype && vnode.type.prototype.render) {
+        var contextType = vnode.type.contextType;
+        var hasContextType = !isUndefined(contextType);
+        var provider = hasContextType ? parentContext[contextType._id] : null;
+        var context = hasContextType ? !isNullOrUndef(provider) ? provider.value : contextType._defaultValue : parentContext;
+        vnode.component = new vnode.type(vnode.props, context);
+    } else {
+        var c = new Component(vnode.props, parentContext);
+        c.render = function () {
+            return vnode.type.call(c, c.props, c.context);
+        };
+        vnode.component = c;
+    }
     var component = vnode.component;
     component.vnode = vnode;
     if (isComponent(parentComponent)) {
         component._parentComponent = parentComponent;
     }
-    if (isFunction(component.componentWillMount)) {
+    var newState = callGetDerivedStateFromProps(vnode.props, component.state, component);
+    if (!isUndefined(newState)) {
+        component.state = newState;
+    }
+    if (!hasNewLifecycle(component) && isFunction(component.componentWillMount)) {
         errorCatcher(function () {
             component.componentWillMount();
         }, component);
@@ -1735,32 +1936,29 @@ function mountComponent(vnode, parentContext, parentComponent) {
     var rendered = renderComponent(component);
     rendered.parentVNode = vnode;
     component._rendered = rendered;
-    if (isFunction(component.componentDidMount)) {
-        readyComponents.push(component);
-    }
     if (!isNullOrUndef(ref)) {
         Ref.attach(vnode, ref, vnode.dom);
     }
     var dom = vnode.dom = mountVNode(rendered, getChildContext(component, parentContext), component);
+    invokeEffects(component);
+    if (isFunction(component.componentDidMount)) {
+        readyComponents.push(component);
+    }
     component._disable = false;
     return dom;
-}
-function mountStatelessComponent(vnode, parentContext) {
-    var rendered = vnode.type(vnode.props, parentContext);
-    vnode._rendered = ensureVirtualNode(rendered);
-    vnode._rendered.parentVNode = vnode;
-    return vnode.dom = mountVNode(vnode._rendered, parentContext);
 }
 function getChildContext(component, context) {
     if (context === void 0) context = EMPTY_OBJ;
 
-    if (component.getChildContext) {
+    if (isFunction(component.getChildContext)) {
         return extend(clone(context), component.getChildContext());
     }
     return clone(context);
 }
 function renderComponent(component) {
     Current.current = component;
+    Current.index = 0;
+    invokeEffects(component, true);
     var rendered;
     errorCatcher(function () {
         rendered = component.render();
@@ -1791,7 +1989,7 @@ function reRenderComponent(prev, current) {
     var nextProps = current.props;
     var nextContext = current.context;
     component._disable = true;
-    if (isFunction(component.componentWillReceiveProps)) {
+    if (!hasNewLifecycle(component) && isFunction(component.componentWillReceiveProps)) {
         errorCatcher(function () {
             component.componentWillReceiveProps(nextProps, nextContext);
         }, component);
@@ -1807,12 +2005,12 @@ function reRenderComponent(prev, current) {
     }
     return updateComponent(component);
 }
-function reRenderStatelessComponent(prev, current, parentContext, domNode) {
-    var lastRendered = prev._rendered;
-    var rendered = current.type(current.props, parentContext);
-    rendered.parentVNode = current;
-    current._rendered = rendered;
-    return current.dom = patch(lastRendered, rendered, lastRendered && lastRendered.dom || domNode, parentContext);
+function callShouldComponentUpdate(props, state, context, component) {
+    var shouldUpdate = true;
+    errorCatcher(function () {
+        shouldUpdate = component.shouldComponentUpdate(props, state, context);
+    }, component);
+    return shouldUpdate;
 }
 function updateComponent(component, isForce) {
     if (isForce === void 0) isForce = false;
@@ -1825,15 +2023,22 @@ function updateComponent(component, isForce) {
     var prevProps = component.prevProps || props;
     var prevState = component.prevState || component.state;
     var prevContext = component.prevContext || context;
+    var stateFromProps = callGetDerivedStateFromProps(props, state, component);
+    if (!isUndefined(stateFromProps)) {
+        state = stateFromProps;
+    }
     component.props = prevProps;
     component.context = prevContext;
     var skip = false;
-    if (!isForce && isFunction(component.shouldComponentUpdate) && component.shouldComponentUpdate(props, state, context) === false) {
+    if (!isForce && isFunction(component.shouldComponentUpdate) && callShouldComponentUpdate(props, state, context, component) === false) {
         skip = true;
-    } else if (isFunction(component.componentWillUpdate)) {
+    } else if (!hasNewLifecycle(component) && isFunction(component.componentWillUpdate)) {
         errorCatcher(function () {
             component.componentWillUpdate(props, state, context);
         }, component);
+    }
+    if (!isUndefined(stateFromProps)) {
+        component.state = stateFromProps;
     }
     component.props = props;
     component.state = state;
@@ -1844,17 +2049,17 @@ function updateComponent(component, isForce) {
         var rendered = renderComponent(component);
         rendered.parentVNode = vnode;
         var childContext = getChildContext(component, context);
+        var snapshot = callGetSnapshotBeforeUpdate(prevProps, prevState, component);
         var parentDom = lastRendered.dom && lastRendered.dom.parentNode;
         dom = vnode.dom = patch(lastRendered, rendered, parentDom || null, childContext);
         component._rendered = rendered;
         if (isFunction(component.componentDidUpdate)) {
             errorCatcher(function () {
-                component.componentDidUpdate(prevProps, prevState, context);
+                component.componentDidUpdate(prevProps, prevState, snapshot);
             }, component);
         }
-        options.afterUpdate(vnode);
         while (vnode = vnode.parentVNode) {
-            if ((vnode.vtype & (4 /* Composite */ | 8 /* Stateless */)) > 0) {
+            if ((vnode.vtype & 4 /* Composite */) > 0) {
                 vnode.dom = dom;
             }
         }
@@ -1864,10 +2069,16 @@ function updateComponent(component, isForce) {
     component.prevContext = component.context;
     component.clearCallBacks();
     flushMount();
+    invokeEffects(component);
     return dom;
 }
 function unmountComponent(vnode) {
     var component = vnode.component;
+    component.hooks.forEach(function (hook) {
+        if (isFunction(hook.cleanup)) {
+            hook.cleanup();
+        }
+    });
     if (isFunction(component.componentWillUnmount)) {
         errorCatcher(function () {
             component.componentWillUnmount();
@@ -1879,8 +2090,36 @@ function unmountComponent(vnode) {
         Ref.detach(vnode, vnode.ref, vnode.dom);
     }
 }
-function unmountStatelessComponent(vnode) {
-    unmount(vnode._rendered);
+function callGetDerivedStateFromProps(props, state, inst) {
+    var ref = inst.constructor;
+    var getDerivedStateFromProps = ref.getDerivedStateFromProps;
+    var newState;
+    // @TODO show warning
+    errorCatcher(function () {
+        if (isFunction(getDerivedStateFromProps)) {
+            var partialState = getDerivedStateFromProps.call(null, props, state);
+            if (!isUndefined(partialState)) {
+                newState = extend(clone(state), partialState);
+            }
+        }
+    }, inst);
+    return newState;
+}
+function callGetSnapshotBeforeUpdate(props, state, inst) {
+    var getSnapshotBeforeUpdate = inst.getSnapshotBeforeUpdate;
+    var snapshot;
+    errorCatcher(function () {
+        if (isFunction(getSnapshotBeforeUpdate)) {
+            snapshot = getSnapshotBeforeUpdate.call(inst, props, state);
+        }
+    }, inst);
+    return snapshot;
+}
+function hasNewLifecycle(component) {
+    if (isFunction(component.constructor.getDerivedStateFromProps)) {
+        return true;
+    }
+    return false;
 }
 
 var items = [];
@@ -1890,14 +2129,16 @@ function enqueueRender(component) {
         nextTick(rerender);
     }
 }
-function rerender() {
+function rerender(isForce) {
+    if (isForce === void 0) isForce = false;
+
     var p;
     var list = items;
     items = [];
     // tslint:disable-next-line:no-conditional-assignment
     while (p = list.pop()) {
         if (p._dirty) {
-            updateComponent(p);
+            updateComponent(p, isForce);
         }
     }
 }
@@ -1906,6 +2147,10 @@ var Component = function Component(props, context) {
     this._dirty = true;
     this._disable = true;
     this._pendingStates = [];
+    this._afterScheduleEffect = false;
+    this.hooks = [];
+    this.effects = EMPTY_CHILDREN;
+    this.layoutEffects = EMPTY_CHILDREN;
     if (!this.state) {
         this.state = {};
     }
@@ -1980,6 +2225,18 @@ var PureComponent = function (Component$$1) {
 
     return PureComponent;
 }(Component);
+
+var options = {
+    afterMount: noop$1,
+    afterUpdate: noop$1,
+    beforeUpdate: noop$1,
+    beforeUnmount: noop$1,
+    beforeRender: noop$1,
+    beforeMount: noop$1,
+    afterCreate: noop$1,
+    roots: [],
+    debug: false
+};
 
 function render(vnode, container, callback) {
     if (!container) {
@@ -2056,53 +2313,47 @@ function addChildren(childNodes, children, type) {
 var ComponentWrapper = function ComponentWrapper(type, props) {
     this.vtype = 4 /* Composite */;
     this.type = type;
-    this.name = type.name || type.toString().match(/^function\s*([^\s(]+)/)[1];
+    this.name = type.name;
+    if (isUndefined(this.name)) {
+        var names = type.toString().match(/^function\s*([^\s(]+)/);
+        this.name = isArray(names) ? names[0] : 'Component';
+    }
     type.displayName = this.name;
     this._owner = props.owner;
     delete props.owner;
     if (this.ref = props.ref) {
         delete props.ref;
     }
+    if (type._forwarded) {
+        if (!isUndefined(this.ref)) {
+            props.ref = this.ref;
+        }
+        delete this.ref;
+    }
     this.props = props;
     this.key = props.key || null;
     this.dom = null;
+    options.afterCreate(this);
 };
 ComponentWrapper.prototype.init = function init(parentContext, parentComponent) {
-    return mountComponent(this, parentContext, parentComponent);
+    options.beforeMount(this);
+    var dom = mountComponent(this, parentContext, parentComponent);
+    options.afterMount(this);
+    return dom;
 };
 ComponentWrapper.prototype.update = function update(previous, current, parentContext, domNode) {
     this.context = parentContext;
-    return reRenderComponent(previous, this);
+    options.beforeUpdate(this);
+    var dom = reRenderComponent(previous, this);
+    options.afterUpdate(this);
+    return dom;
 };
 ComponentWrapper.prototype.destroy = function destroy() {
+    options.beforeUnmount(this);
     unmountComponent(this);
 };
 
-var StateLessComponent = function StateLessComponent(type, props) {
-    this.vtype = 8 /* Stateless */;
-    this.type = type;
-    this._owner = props.owner;
-    delete props.owner;
-    this.props = props;
-    this.key = props.key;
-};
-StateLessComponent.prototype.init = function init(parentContext) {
-    return mountStatelessComponent(this, parentContext);
-};
-StateLessComponent.prototype.update = function update(previous, current, parentContext) {
-    var props = current.props;
-    var context = current.context;
-    var shouldComponentUpdate = props.onShouldComponentUpdate;
-    if (isFunction(shouldComponentUpdate) && !shouldComponentUpdate(previous.props, props, context)) {
-        current._rendered = previous._rendered;
-        return previous.dom;
-    }
-    return reRenderStatelessComponent(previous, this, parentContext, previous.dom);
-};
-StateLessComponent.prototype.destroy = function destroy() {
-    unmountStatelessComponent(this);
-};
-
+// import StatelessComponent from './stateless-component'
 function transformPropsForRealTag(type, props) {
     var newProps = {};
     for (var propName in props) {
@@ -2166,7 +2417,7 @@ function createElement$2(type, properties) {
             props.children = children || children === 0 ? children : EMPTY_CHILDREN;
         }
         props.owner = Current.current;
-        return type.prototype && type.prototype.render ? new ComponentWrapper(type, props) : new StateLessComponent(type, props);
+        return new ComponentWrapper(type, props);
     }
     return type;
 }
@@ -2389,6 +2640,141 @@ var PropTypes = {
 };
 PropTypes.PropTypes = PropTypes;
 
+function createRef() {
+    return {};
+}
+function forwardRef(cb) {
+    var fn = function (props) {
+        var ref = props.ref;
+        delete props.ref;
+        return cb(props, ref);
+    };
+    fn._forwarded = true;
+    return fn;
+}
+
+function memo(component, propsAreEqual) {
+    function shouldComponentUpdate(nextProps) {
+        var prevRef = this.props.ref;
+        var nextRef = nextProps.ref;
+        if (prevRef !== nextRef) {
+            Ref.detach(this.vnode, prevRef, this.dom);
+            Ref.attach(this.vnode, nextRef, this.dom);
+            return true;
+        }
+        return isFunction(propsAreEqual) ? !propsAreEqual(this.props, nextProps) : !shallowEqual(this.props, nextProps);
+    }
+    function Memoed(props) {
+        this.shouldComponentUpdate = shouldComponentUpdate;
+        return createElement$2(component, Object.assign({}, props));
+    }
+    Memoed._forwarded = true;
+    return Memoed;
+}
+
+var Emiter = function Emiter(value) {
+    this.handlers = [];
+    this.value = value;
+};
+Emiter.prototype.on = function on(handler) {
+    this.handlers.push(handler);
+};
+Emiter.prototype.off = function off(handler) {
+    this.handlers = this.handlers.filter(function (h) {
+        return h !== handler;
+    });
+};
+Emiter.prototype.set = function set(value) {
+    var this$1 = this;
+
+    this.value = value;
+    this.handlers.forEach(function (h) {
+        return h(this$1.value);
+    });
+};
+
+var uid = 0;
+function onlyChild(children) {
+    return Array.isArray(children) ? children[0] : children;
+}
+function createContext(defaultValue) {
+    var contextProp = '__context_' + uid++ + '__';
+    var Provider = function (Component$$1) {
+        function Provider() {
+            Component$$1.apply(this, arguments);
+            this.emiter = new Emiter(this.props.value);
+        }
+
+        if (Component$$1) Provider.__proto__ = Component$$1;
+        Provider.prototype = Object.create(Component$$1 && Component$$1.prototype);
+        Provider.prototype.constructor = Provider;
+        Provider.prototype.getChildContext = function getChildContext() {
+            return obj = {}, obj[contextProp] = this.emiter, obj;
+            var obj;
+        };
+        Provider.prototype.componentWillReceiveProps = function componentWillReceiveProps(nextProps) {
+            if (!objectIs(this.props.value, nextProps.value)) {
+                this.emiter.set(nextProps.value);
+            }
+        };
+        Provider.prototype.render = function render() {
+            return this.props.children;
+        };
+
+        return Provider;
+    }(Component);
+    // tslint:disable-next-line: max-classes-per-file
+    var Consumer = function (Component$$1) {
+        function Consumer() {
+            var this$1 = this;
+
+            Component$$1.apply(this, arguments);
+            this.state = {
+                value: this.getContextValue()
+            };
+            this.onUpdate = function (value) {
+                if (!objectIs(value, this$1.state.value)) {
+                    this$1.setState({
+                        value: this$1.getContextValue()
+                    });
+                }
+            };
+        }
+
+        if (Component$$1) Consumer.__proto__ = Component$$1;
+        Consumer.prototype = Object.create(Component$$1 && Component$$1.prototype);
+        Consumer.prototype.constructor = Consumer;
+        Consumer.prototype.componentWillMount = function componentWillMount() {
+            var emiter = this.context[contextProp];
+            if (emiter) {
+                emiter.off(this.onUpdate);
+            }
+        };
+        Consumer.prototype.componentDidMount = function componentDidMount() {
+            var emiter = this.context[contextProp];
+            if (emiter) {
+                emiter.on(this.onUpdate);
+            }
+        };
+        Consumer.prototype.getContextValue = function getContextValue() {
+            var emiter = this.context[contextProp];
+            return isUndefined(emiter) ? defaultValue : emiter.value;
+        };
+        Consumer.prototype.render = function render() {
+            return onlyChild(this.props.children)(this.state.value);
+        };
+
+        return Consumer;
+    }(Component);
+    return {
+        Provider: Provider,
+        Consumer: Consumer,
+        _id: contextProp,
+        _defaultValue: defaultValue
+    };
+}
+
+// tslint:disable-next-line: max-line-length
 var index = {
     Children: Children,
     Component: Component,
@@ -2407,7 +2793,12 @@ var index = {
     createFactory: createFactory,
     unstable_batchedUpdates: unstable_batchedUpdates,
     version: version,
-    PropTypes: PropTypes
+    PropTypes: PropTypes,
+    createRef: createRef,
+    forwardRef: forwardRef,
+    memo: memo,
+    createContext: createContext,
+    useEffect: useEffect, useLayoutEffect: useLayoutEffect, useReducer: useReducer, useState: useState, useRef: useRef, useCallback: useCallback, useMemo: useMemo, useImperativeHandle: useImperativeHandle, useContext: useContext
 };
 
 exports.Children = Children;
@@ -2428,6 +2819,19 @@ exports.createFactory = createFactory;
 exports.unstable_batchedUpdates = unstable_batchedUpdates;
 exports.version = version;
 exports.PropTypes = PropTypes;
+exports.createRef = createRef;
+exports.forwardRef = forwardRef;
+exports.memo = memo;
+exports.createContext = createContext;
+exports.useEffect = useEffect;
+exports.useLayoutEffect = useLayoutEffect;
+exports.useReducer = useReducer;
+exports.useState = useState;
+exports.useRef = useRef;
+exports.useCallback = useCallback;
+exports.useMemo = useMemo;
+exports.useImperativeHandle = useImperativeHandle;
+exports.useContext = useContext;
 exports['default'] = index;
 //# sourceMappingURL=index.js.map
 
@@ -14140,6 +14544,32 @@ function (_Nerv$Component) {
         className: "at-timeline__content"
       }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("p", {
         className: "head"
+      }, "v2.2.0"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("p", {
+        className: "time"
+      }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "2019-06-12")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("ul", {
+        className: "content"
+      }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("li", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "Calendar"), "\u7EC4\u4EF6\u65B0\u589E\u4EC5\u663E\u793A\u6709\u6548\u65F6\u95F4\u7EC4\u529F\u80FD\uFF08", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("a", {
+        href: "https://github.com/NervJS/taro-ui/issues/527"
+      }, "#527"), "\uFF09"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("li", null, "\u4FEE\u590D", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "SearchBar"), "\u8F93\u5165\u6846\u6587\u5B57\u663E\u793A\u4E0D\u5168\u7684\u6837\u5F0F\u95EE\u9898\uFF08", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("a", {
+        href: "https://github.com/NervJS/taro-ui/issues/539"
+      }, "#539"), "\uFF09"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("li", null, "\u4FEE\u590D", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "SwipeAction"), "\u65B0\u7248\u672C\u62A5\u9519\u95EE\u9898\uFF08", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("a", {
+        href: "https://github.com/NervJS/taro-ui/issues/574"
+      }, "#574"), "\uFF09"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("li", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "SwipeAction"), "\u963B\u6B62\u6ED1\u52A8\u89E6\u53D1\u9ED8\u8BA4\u884C\u4E3A\uFF08", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("a", {
+        href: "https://github.com/NervJS/taro-ui/issues/525"
+      }, "#525"), "\uFF09"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("li", null, "\u4FEE\u590D", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "Accordion"), "\u7EC4\u4EF6\u6298\u53E0\u540E\u9AD8\u5EA6\u4ECD\u4FDD\u7559\u7684\u6837\u5F0F\u95EE\u9898\uFF08", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("a", {
+        href: "https://github.com/NervJS/taro-ui/issues/629"
+      }, "#629"), "\uFF09"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("li", null, "\u4FEE\u590D", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "Typings"))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("div", {
+        className: "at-timeline__item at-timeline__item--custom at-timeline__item--error"
+      }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("div", {
+        className: "at-timeline__tail"
+      }), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("div", {
+        className: "at-timeline__dot"
+      }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("i", {
+        className: "icon icon-award"
+      })), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("div", {
+        className: "at-timeline__content"
+      }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("p", {
+        className: "head"
       }, "v2.1.0"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("p", {
         className: "time"
       }, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", null, "2019-04-10")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("ul", {
@@ -15639,7 +16069,7 @@ function (_Nerv$Component) {
         className: "hljs-tag"
       }, "</", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "hljs-name"
-      }, "AtButton"), ">"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "    )", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "  ", '}', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), '}', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null)))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "\u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u7C7B\u578B"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53EF\u9009\u503C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u9ED8\u8BA4\u503C"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "isOpened"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u662F\u5426\u5F00\u542F"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "Boolean"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "false")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "closeBtnPosition"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u5173\u95ED\u56FE\u6807\u4F4D\u7F6E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "'top'\uFF0C 'bottom'"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "bottom")))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u4E8B\u4EF6\u540D\u79F0"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8FD4\u56DE\u53C2\u6570"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onClose"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u5173\u95ED\u6309\u94AE\u89E6\u53D1\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "event")))));
+      }, "AtButton"), ">"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "    )", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "  ", '}', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), '}', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null)))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "\u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u7C7B\u578B"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53EF\u9009\u503C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u9ED8\u8BA4\u503C"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "isOpened"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u662F\u5426\u5F00\u542F"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "Boolean"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "false")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "closeBtnPosition"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u5173\u95ED\u56FE\u6807\u4F4D\u7F6E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "'top', 'top-left', 'top-right', 'bottom', 'bottom-left', 'bottom-right'"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "bottom")))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u4E8B\u4EF6\u540D\u79F0"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8FD4\u56DE\u53C2\u6570"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onClose"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u5173\u95ED\u6309\u94AE\u89E6\u53D1\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "event")))));
     }
   }]);
 
@@ -19886,6 +20316,10 @@ function (_Nerv$Component) {
         className: "hljs-keyword"
       }, "import"), " ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "hljs-string"
+      }, "\"~taro-ui/dist/style/components/toast.scss\""), ";", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "@", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
+        className: "hljs-keyword"
+      }, "import"), " ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
+        className: "hljs-string"
       }, "\"~taro-ui/dist/style/components/indexes.scss\""), ";", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "@", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "hljs-keyword"
       }, "import"), " ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
@@ -22417,7 +22851,7 @@ function (_Nerv$Component) {
         className: "hljs-attr"
       }, "content"), "=", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "hljs-string"
-      }, "'\u6B22\u8FCE\u52A0\u5165\u4EAC\u4E1C\u51F9\u51F8\u5B9E\u9A8C\u5BA4\\n\\r\u6B22\u8FCE\u52A0\u5165\u4EAC\u4E1C\u51F9\u51F8\u5B9E\u9A8C\u5BA4'"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "/>"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "AtModal \u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u7C7B\u578B"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53EF\u9009\u503C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u9ED8\u8BA4\u503C"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "title"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u5143\u7D20\u7684\u6807\u9898"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "content"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u5143\u7D20\u7684\u5185\u5BB9"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "cancelText"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u53D6\u6D88\u6309\u94AE\u7684\u6587\u672C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "closeOnClickOverlay"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u6D6E\u5C42\u7684\u65F6\u5019\u65F6\u5019\u81EA\u52A8\u5173\u95ED"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "Boolean"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("code", null, "true"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "confirmText"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u786E\u8BA4\u6309\u94AE\u7684\u6587\u672C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "isOpened"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u662F\u5426\u663E\u793A\u6A21\u6001\u6846"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("code", null, "false"))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "AtModal \u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u4E8B\u4EF6\u540D\u79F0"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8FD4\u56DE\u53C2\u6570"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onClose"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u89E6\u53D1\u5173\u95ED\u65F6\u7684\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onCancel"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u53D6\u6D88\u6309\u94AE\u89E6\u53D1\u7684\u6837\u5F0F"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onConfirm"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u786E\u8BA4\u6309\u94AE\u89E6\u53D1\u7684\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")))));
+      }, "'\u6B22\u8FCE\u52A0\u5165\u4EAC\u4E1C\u51F9\u51F8\u5B9E\u9A8C\u5BA4\\n\\r\u6B22\u8FCE\u52A0\u5165\u4EAC\u4E1C\u51F9\u51F8\u5B9E\u9A8C\u5BA4'"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "/>"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "AtModal \u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53C2\u6570"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u7C7B\u578B"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u53EF\u9009\u503C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u9ED8\u8BA4\u503C"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "title"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u5143\u7D20\u7684\u6807\u9898"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "content"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u5143\u7D20\u7684\u5185\u5BB9"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "cancelText"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u53D6\u6D88\u6309\u94AE\u7684\u6587\u672C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "closeOnClickOverlay"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u6D6E\u5C42\u7684\u65F6\u5019\u65F6\u5019\u81EA\u52A8\u5173\u95ED"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "Boolean"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("code", null, "true"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "confirmText"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u786E\u8BA4\u6309\u94AE\u7684\u6587\u672C"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "isOpened"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u662F\u5426\u663E\u793A\u6A21\u6001\u6846"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "String"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("code", null, "false"))))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("h2", null, "AtModal \u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("table", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("thead", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u4E8B\u4EF6\u540D\u79F0"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8BF4\u660E"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("th", null, "\u8FD4\u56DE\u53C2\u6570"))), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tbody", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onClose"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u89E6\u53D1\u5173\u95ED\u65F6\u7684\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onCancel"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u53D6\u6D88\u6309\u94AE\u89E6\u53D1\u7684\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("tr", null, nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "onConfirm"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "\u70B9\u51FB\u786E\u8BA4\u6309\u94AE\u89E6\u53D1\u7684\u4E8B\u4EF6"), nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("td", null, "-")))));
     }
   }]);
 
@@ -28050,7 +28484,7 @@ function (_Nerv$Component) {
         className: "hljs-keyword"
       }, "extends"), " ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "hljs-title"
-      }, "Components"), " "), '{', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "  render () ", '{', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "    ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
+      }, "Component"), " "), '{', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "  render () ", '{', nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "    ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "hljs-keyword"
       }, "return"), " (", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("br", null), "      ", nervjs__WEBPACK_IMPORTED_MODULE_0__["createElement"]("span", {
         className: "xml"
