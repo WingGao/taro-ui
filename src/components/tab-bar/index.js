@@ -28,6 +28,10 @@ export default class AtTabBar extends AtComponent {
     this.props.onClick(...arguments)
   }
 
+  getImgStyle (image) {
+    return Object.assign({},imgStyle,image.style)
+  }
+
   render () {
     const {
       customStyle,
@@ -103,7 +107,7 @@ export default class AtTabBar extends AtComponent {
                     }
                     mode='widthFix'
                     src={item.selectedImage || item.image}
-                    style={imgStyle}
+                    style={getImgStyle(image)}
                   ></Image>
                   <Image
                     className={classNames(
@@ -113,7 +117,7 @@ export default class AtTabBar extends AtComponent {
                     }
                     mode='widthFix'
                     src={item.image}
-                    style={imgStyle}
+                    style={getImgStyle(image)}
                   ></Image>
                 </View>
               </AtBadge>
