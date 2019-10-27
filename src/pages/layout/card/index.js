@@ -1,6 +1,6 @@
 import Taro from '@tarojs/taro'
 import { View } from '@tarojs/components'
-import { AtCard } from 'taro-ui'
+import { AtCard, AtIcon } from 'taro-ui'
 import DocsHeader from '../../components/doc-header'
 import './index.scss'
 
@@ -59,6 +59,22 @@ export default class CardPage extends Taro.Component {
           </View>
 
           <View className='panel'>
+            <View className='panel__title'>自定义图标的卡片</View>
+            <View className='panel__content no-padding'>
+              <View className='example-item'>
+                <AtCard
+                  title='这是个标题'
+                  renderIcon={
+                    <AtIcon prefixClass='at-icon' value='image' size='16' color='#6190e8' customStyle={{ marginRight: '8px' }} ></AtIcon>
+                  }
+                >
+                  这也是内容区 可以随意定义功能
+                </AtCard>
+              </View>
+            </View>
+          </View>
+
+          <View className='panel'>
             <View className='panel__title'>带小信息的卡片</View>
             <View className='panel__content no-padding'>
               <View className='example-item'>
@@ -74,12 +90,13 @@ export default class CardPage extends Taro.Component {
           </View>
 
           <View className='panel'>
-            <View className='panel__title'>完整的卡片</View>
+            <View className='panel__title'>自定义额外信息样式的卡片</View>
             <View className='panel__content no-padding'>
               <View className='example-item'>
                 <AtCard
                   note='小Tips'
-                  extra='额外信息'
+                  extra='2019/01/23 22:33:33'
+                  extraStyle={{ fontSize: '12px', maxWidth: '200px', color: '#6190e8' }}
                   title='这是个标题'
                   thumb='http://img10.360buyimg.com/jdphoto/s72x72_jfs/t5872/209/5240187906/2872/8fa98cd/595c3b2aN4155b931.png'
                 >

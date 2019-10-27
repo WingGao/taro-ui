@@ -14,7 +14,7 @@ export default class AtCard extends AtComponent {
   }
 
   render () {
-    const { title, note, extra, thumb, isFull, icon } = this.props
+    const { title, note, extra, extraStyle, thumb, isFull, icon } = this.props
 
     const rootClass = classNames(
       'at-card',
@@ -46,11 +46,15 @@ export default class AtCard extends AtComponent {
               />
             </View>
           )}
+          {
+            this.props.renderIcon
+          }
           {!thumb && icon && icon.value && (
             <Text className={iconClass} style={iconStyle}></Text>
           )}
+
           <Text className='at-card__header-title'>{title}</Text>
-          {extra && <Text className='at-card__header-extra'>{extra}</Text>}
+          {extra && <Text style={{ ...extraStyle }} className='at-card__header-extra'>{extra}</Text>}
         </View>
         <View className='at-card__content'>
           <View className='at-card__content-info'>{this.props.children}</View>
@@ -69,6 +73,8 @@ AtCard.defaultProps = {
   extra: '',
   icon: {},
   onClick () {},
+  renderIcon: '',
+  extraStyle: {},
 }
 
 AtCard.propTypes = {
@@ -79,13 +85,18 @@ AtCard.propTypes = {
   extra: PropTypes.string,
   icon: PropTypes.object,
   onClick: PropTypes.func,
+  renderIcon: PropTypes.oneOfType([
+    PropTypes.string,
+    PropTypes.element
+  ]),
+  extraStyle: PropTypes.object // 自定义extra样式
 }
 
-AtCard.defaultProps = {
-  note: '',
-  isFull: false,
-  thumb: '',
-  title: '',
-  extra: '',
-  onClick: () => {},
-}
+// AtCard.defaultProps = {
+//   note: '',
+//   isFull: false,
+//   thumb: '',
+//   title: '',
+//   extra: '',
+//   onClick: () => {},
+// }

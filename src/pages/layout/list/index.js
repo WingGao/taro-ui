@@ -49,7 +49,7 @@ export default class ListPage extends Component {
                   <AtListItem
                     arrow='right'
                     note='描述信息'
-                    title='标题文字标题文字标题文字标题文字标题文字'
+                    title='我是一个很长很长很长的标题文字'
                     extraText='详细信息详细信息详细信息详细信息'
                   />
                 </AtList>
